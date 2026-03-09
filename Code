@@ -1,0 +1,159 @@
+#include <xc.h>
+#include <stdio.h>
+
+#pragma config OSC = INTIO67
+#pragma config PWRT = ON        
+#pragma config BOREN= OFF   
+#pragma config WDT  = OFF       
+#pragma config MCLRE= ON  
+#pragma config LVP  = OFF 
+#pragma config PBADEN  = OFF 
+#pragma config DEBUG = OFF 
+
+#define _XTAL_FREQ 4000000
+
+// LCD control pins
+#define en PORTCbits.RC2
+#define rs PORTCbits.RC1
+#define relay PORTCbits.RC0
+
+// Global variables
+unsigned char m1, m2, m3, m4;
+unsigned int setTemp = 0;
+unsigned int currentTemp = 0;
+char buffer[16];
+
+// Function prototypes
+void lcd_string(const char *S);
+void lcdinit(void);
+void lcdcmd(unsigned char data);
+void lcddata(unsigned char data);
+unsigned int atod(void);
+void modulo_division(unsigned int temp1);
+char Keypad_GetKey(void);
+
+// ---------------- LCD FUNCTIONS ----------------
+void lcd_string(const char *S) {
+    while(*S) {
+        lcddata(*S++);
+    }
+}
+
+void lcdcmd(unsigned char data) {
+    PORTD = data;
+    rs = 0;
+    en = 1; __delay_ms(1); en = 0;
+}
+
+void lcddata(unsigned char data) {
+    PORTD = data;
+    rs = 1;
+    en = 1; __delay_ms(1); en = 0;
+}
+
+void lcdinit(void) {
+    lcdcmd(0x01);
+    __delay_ms(20);
+    lcdcmd(0x38);   // 8-bit, 2 line
+    __delay_ms(5);
+    lcdcmd(0x0C);   // Display ON, cursor OFF
+    __delay_ms(5);
+    lcdcmd(0x06);   // Entry mode
+    __delay_ms(5);
+    lcdcmd(0x80);   // Cursor to 1st line
+}
+
+// ---------------- ADC (LM35) ----------------
+unsigned int atod(void) {
+    unsigned int VR;
+    ADCON0 = 0x01;   // channel AN0
+    ADCON0bits.GO = 1;
+    while(ADCON0bits.DONE == 1);
+
+    VR = ADRESH;
+    VR = (VR << 8) | ADRESL;
+
+    return (VR/2.04);  // Convert to Celsius
+}
+
+// ---------------- Keypad (4x3 on PORTB) ----------------
+char Keypad_GetKey(void) {
+    const char keys[4][3] = {
+        {'1','2','3'},
+        {'4','5','6'},
+        {'7','8','9'},
+        {'*','0','#'}
+    };
+
+    for(int col=0; col<3; col++) {
+        PORTB = ~(1<<col); // drive one column low
+        __delay_ms(2);
+        for(int row=0; row<4; row++) {
+            if(!(PORTB & (1<<(row+4)))) { // check row
+                __delay_ms(200); // debounce
+                return keys[row][col];
+            }
+        }
+    }
+    return 0;
+}
+
+// ---------------- MAIN ----------------
+void main(void) {
+    OSCCON = 0x6F; // 4 MHz internal
+
+    // ADC setup
+    ADCON0 = 0x01;   // Channel AN0
+    ADCON1 = 0x0E;   // AN0 analog, rest digital
+    ADCON2 = 0xA4;   // Right justified
+
+    // I/O setup
+    TRISAbits.TRISA0 = 1; // AN0 input
+    TRISB = 0xF0;         // RB0-2 outputs (cols), RB4-7 inputs (rows)0output 1 input
+    TRISC = 0x00;         // Relay + LCD controls
+    TRISD = 0x00;         // LCD data
+
+    __delay_ms(10);
+
+    lcdinit();
+    lcd_string("Enter Temp:");
+    lcdcmd(0xC0);
+
+    // Get Set Temperature
+    char key;
+    setTemp = 0;
+    while(1) {
+        key = Keypad_GetKey();
+        if(key >= '0' && key <= '9') {
+            setTemp = setTemp*10 + (key-'0');
+            lcddata(key);
+        }
+        if(key == '#') break; // '#' to confirm
+    }
+
+    __delay_ms(1000);
+    lcdcmd(0x01);
+
+    while(1) {
+        currentTemp = atod();
+
+        // Display Current Temp
+        lcdcmd(0x80);
+        sprintf(buffer, "Cur:%2dC", currentTemp);
+        lcd_string(buffer);
+
+        // Display Set Temp
+        lcdcmd(0xC0);
+        sprintf(buffer, "Set:%2dC", setTemp);
+        lcd_string(buffer);
+
+        // Heater control
+        if(currentTemp < setTemp) {
+            relay = 1;
+        } else {
+            relay = 0;
+        }
+
+        __delay_ms(500);
+    }
+}
